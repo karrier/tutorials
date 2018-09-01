@@ -1,4 +1,4 @@
-# Tutorials
+# Code Snippets for Karrier's Kubernetes Tutorials
 
 At Karrier, we provide access to multi-tenant Kubernetes clusters around the world, using granular metering and simple pricing.
 
