@@ -1,0 +1,320 @@
+---
+apiVersion: certmanager.k8s.io/v1alpha1
+kind: Issuer
+metadata:
+  name: selfsigning-issuer
+spec:
+  selfSigned: {}
+---
+apiVersion: certmanager.k8s.io/v1alpha1
+kind: Certificate
+metadata:
+  name: etcd-ca
+spec:
+  secretName: etcd-ca
+  isCA: true
+  commonName: etcd-ca
+  issuerRef:
+    name: selfsigning-issuer
+    kind: Issuer
+---
+apiVersion: certmanager.k8s.io/v1alpha1
+kind: Certificate
+metadata:
+  name: etcd-peer-ca
+spec:
+  secretName: etcd-peer-ca
+  isCA: true
+  commonName: etcd-peer-ca
+  issuerRef:
+    name: selfsigning-issuer
+    kind: Issuer
+---
+apiVersion: certmanager.k8s.io/v1alpha1
+kind: Issuer
+metadata:
+  name: etcd-ca-issuer
+  labels:
+    app: etcd
+spec:
+  ca:
+    secretName: etcd-ca
+---
+apiVersion: certmanager.k8s.io/v1alpha1
+kind: Issuer
+metadata:
+  name: etcd-peer-ca-issuer
+  labels:
+    app: etcd
+spec:
+  ca:
+    secretName: etcd-peer-ca
+---
+apiVersion: certmanager.k8s.io/v1alpha1
+kind: Certificate
+metadata:
+  name: etcd-server-tls
+  labels:
+    app: etcd
+spec:
+  secretName: etcd-server-tls
+  issuerRef:
+    name: etcd-ca-issuer
+    kind: Issuer
+  commonName: etcd
+  dnsNames:
+  - etcd-0.etcd
+  - etcd-1.etcd
+  - etcd-2.etcd
+---
+apiVersion: certmanager.k8s.io/v1alpha1
+kind: Certificate
+metadata:
+  name: etcd-client-tls
+  labels:
+    app: etcd
+spec:
+  secretName: etcd-client-tls
+  issuerRef:
+    name: etcd-ca-issuer
+    kind: Issuer
+  commonName: etcd-client
+---
+apiVersion: certmanager.k8s.io/v1alpha1
+kind: Certificate
+metadata:
+  name: etcd-peer-tls
+  labels:
+    app: etcd
+spec:
+  secretName: etcd-peer-tls
+  issuerRef:
+    name: etcd-peer-ca-issuer
+    kind: Issuer
+  commonName: etcd-peer
+  dnsNames:
+  - etcd-0.etcd
+  - etcd-1.etcd
+  - etcd-2.etcd
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: etcd-serviceaccount
+  labels:
+    app: etcd
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: etcd-role
+  labels:
+    app: etcd
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  resourceNames:
+  - etcd-ca
+  - etcd-peer-ca
+  - etcd-server-tls
+  - etcd-client-tls
+  - etcd-peer-tls
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: etcd-role-binding
+  labels:
+    app: etcd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: etcd-role
+subjects:
+- kind: ServiceAccount
+  name: etcd-serviceaccount
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: etcd
+  labels:
+    app: etcd
+spec:
+  serviceName: etcd
+  replicas: 3
+  selector:
+    matchLabels:
+      app: etcd
+  template:
+    metadata:
+      name: etcd
+      labels:
+        app: etcd
+    spec:
+      serviceAccountName: etcd-serviceaccount
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - etcd
+      containers:
+      - name: etcd
+        image: karrier/etcd:v3.3.9
+        command:
+        - /usr/local/bin/etcd
+        - --name=$(HOSTNAME).etcd
+        - --listen-peer-urls=https://$(POD_IP):2380
+        - --initial-advertise-peer-urls=https://$(HOSTNAME).etcd:2380
+        - --initial-cluster=etcd-0.etcd=https://etcd-0.etcd:2380,etcd-1.etcd=https://etcd-1.etcd:2380,etcd-2.etcd=https://etcd-2.etcd:2380
+        - --trusted-ca-file=/etc/etcd/pki/ca.crt
+        - --peer-cert-file=/etc/etcd/pki/peer.crt
+        - --advertise-client-urls=https://$(HOSTNAME).etcd:2379
+        - --client-cert-auth=true
+        - --data-dir=/var/run/etcd
+        - --key-file=/etc/etcd/pki/server.key
+        - --peer-trusted-ca-file=/etc/etcd/pki/peer-ca.crt
+        - --listen-client-urls=https://$(POD_IP):2379
+        - --peer-client-cert-auth=true
+        - --cert-file=/etc/etcd/pki/server.crt
+        - --peer-key-file=/etc/etcd/pki/peer.key
+        ports:
+        - containerPort: 2379
+          name: client
+        - containerPort: 2380
+          name: peer
+        env:
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        volumeMounts:
+        - name: etcd-data
+          mountPath: /var/run/etcd
+        - name: etcd-ca-tls
+          mountPath: /etc/etcd/pki/ca.crt
+          subPath: ca.crt
+        - name: etcd-peer-ca-tls
+          mountPath: /etc/etcd/pki/peer-ca.crt
+          subPath: peer-ca.crt
+        - name: etcd-server-tls
+          mountPath: /etc/etcd/pki/server.crt
+          subPath: server.crt
+        - name: etcd-server-tls
+          mountPath: /etc/etcd/pki/server.key
+          subPath: server.key
+        - name: etcd-peer-tls
+          mountPath: /etc/etcd/pki/peer.crt
+          subPath: peer.crt
+        - name: etcd-peer-tls
+          mountPath: /etc/etcd/pki/peer.key
+          subPath: peer.key
+      volumes:
+      - name: etcd-ca-tls
+        secret:
+          secretName: etcd-ca
+          items:
+          - key: tls.crt
+            path: ca.crt
+      - name: etcd-peer-ca-tls
+        secret:
+          secretName: etcd-peer-ca
+          items:
+          - key: tls.crt
+            path: peer-ca.crt
+      - name: etcd-server-tls
+        secret:
+          secretName: etcd-server-tls
+          items:
+          - key: tls.crt
+            path: server.crt
+          - key: tls.key
+            path: server.key
+      - name: etcd-peer-tls
+        secret:
+          secretName: etcd-peer-tls
+          items:
+          - key: tls.crt
+            path: peer.crt
+          - key: tls.key
+            path: peer.key
+  volumeClaimTemplates:
+  - metadata:
+      name: etcd-data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: policy/v1beta1
+kind: PodDisruptionBudget
+metadata:
+  name: etcd
+  labels:
+    app: etcd
+spec:
+  selector:
+    matchLabels:
+      app: etcd
+  minAvailable: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd
+  labels:
+    app: etcd
+  annotations:
+    service.alpha.kubernetes.io/tolerate-unready-endpoints: "true"
+spec:
+  clusterIP: None
+  selector:
+    app: etcd
+  ports:
+  - port: 2379
+    name: client
+  - port: 2380
+    name: peer
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: etcd-network-policy
+  labels:
+    app: etcd
+spec:
+  podSelector:
+    matchLabels:
+      app: etcd
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: etcd
+    ports:
+    - protocol: TCP
+      port: 2380
+  - from:
+    - podSelector:
+        matchLabels:
+          app: example-app
+    ports:
+    - protocol: TCP
+      port: 2379
